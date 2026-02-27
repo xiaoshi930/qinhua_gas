@@ -1,7 +1,7 @@
 {
   "domain": "qinhua_gas",
   "name": "秦华燃气",
-  "documentation": "https://github.com/xiaoshi930i/qinhua_gas",
+  "documentation": "https://github.com/xiaoshi930/qinhua_gas",
   "dependencies": [],
   "codeowners": ["xiaoshi930"],
   "requirements": ["aiohttp"],

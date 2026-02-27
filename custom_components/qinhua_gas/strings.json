@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "设置秦华燃气",
+        "description": "请输入您的燃气卡信息和token",
+        "data": {
+          "card_id": "燃气卡号",
+          "user_name": "用户姓名",
+          "now_price": "燃气单价",
+          "token_account": "账户信息Token",
+          "token_current_month": "本月用量Token",
+          "token_last_month": "上月用量Token"
+        }
+      },
+      "init": {
+        "title": "修改秦华燃气配置",
+        "description": "请修改您的燃气卡信息和token",
+        "data": {
+          "card_id": "燃气卡号",
+          "user_name": "用户姓名",
+          "now_price": "燃气单价",
+          "token_account": "账户信息Token",
+          "token_current_month": "本月用量Token",
+          "token_last_month": "上月用量Token"
+        }
+      }
+    },
+    "error": {
+      "unknown": "未知错误"
+    }
+  }
+}

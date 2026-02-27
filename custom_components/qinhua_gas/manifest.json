@@ -1,0 +1,11 @@
+{
+  "domain": "qinhua_gas",
+  "name": "秦华燃气",
+  "documentation": "https://github.com/xiaoshi930i/qinhua_gas",
+  "dependencies": [],
+  "codeowners": ["xiaoshi930"],
+  "requirements": ["aiohttp"],
+  "config_flow": true,
+  "iot_class": "cloud_polling",
+  "version": "1.0"
+}

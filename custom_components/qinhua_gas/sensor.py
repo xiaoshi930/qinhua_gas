@@ -62,7 +62,7 @@ class QinghuaGasSensor(SensorEntity):
         self.token_account = token_account
         self.token_current_month = token_current_month
         self.token_last_month = token_last_month
-        self._attr_name = f"sensor.ranqi_{card_id}"
+        self._attr_name = f"ranqi_{card_id}"
         self._attr_unique_id = f"{entry.entry_id}_gas"
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = "元"

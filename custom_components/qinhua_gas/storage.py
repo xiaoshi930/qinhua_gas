@@ -96,7 +96,7 @@ class QinhuaGasStorage:
                 existing_map[k].update(item)
             else:
                 existing_map[k] = item
-        return sorted(existing_map.values(), key=lambda x: x[key])
+        return sorted(existing_map.values(), key=lambda x: x[key], reverse=True)
 
     def update(self, new_data: dict[str, Any]) -> dict[str, Any]:
         """Update storage with new data, then return merged result.
@@ -126,11 +126,18 @@ class QinhuaGasStorage:
                 self._data.get("monthList", []), new_data["monthList"], "month"
             )
 
-        # Merge yearList by "year"
-        if "yearList" in new_data:
-            self._data["yearList"] = self._merge_list_by_key(
-                self._data.get("yearList", []), new_data["yearList"], "year"
-            )
+        # 根据合并后的 monthList 重新计算 yearList
+        year_map = {}
+        for month_data in self._data.get("monthList", []):
+            year = month_data["month"].split("-")[0]
+            if year not in year_map:
+                year_map[year] = {"year": year, "yearEleNum": 0, "yearEleCost": 0}
+            year_map[year]["yearEleNum"] += month_data.get("monthEleNum", 0)
+            year_map[year]["yearEleCost"] += month_data.get("monthEleCost", 0)
+        self._data["yearList"] = sorted(
+            [{"year": v["year"], "yearEleNum": round(v["yearEleNum"], 2), "yearEleCost": round(v["yearEleCost"], 2)} for v in year_map.values()],
+            key=lambda x: x["year"], reverse=True
+        )
 
         # Save to file
         self._save_sync()

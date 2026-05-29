@@ -210,6 +210,7 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
 
             # 计算每日费用
             day_list = self._calculate_daily_cost(day_list)
+            day_list.reverse()  # 改为最新日期在前
 
             # 处理月数据
             month_list = self._process_month_data(day_list)
@@ -395,7 +396,7 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
                     "monthEleCost": round(month_data["monthEleCost"], 2),
                 })
 
-            return sorted(result, key=lambda x: x["month"])
+            return sorted(result, key=lambda x: x["month"], reverse=True)
         except Exception as ex:
             _LOGGER.error("处理月数据失败: %s", ex)
             return []

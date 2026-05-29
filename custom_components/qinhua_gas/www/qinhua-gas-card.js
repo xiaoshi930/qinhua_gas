@@ -1,4 +1,4 @@
-﻿console.info("%c 消逝卡-燃气卡 \n%c        v 1.2 ", "color: red; font-weight: bold; background: black", "color: white; font-weight: bold; background: black");
+console.info("%c 消逝卡-燃气卡 \n%c        v 1.3 ", "color: red; font-weight: bold; background: black", "color: white; font-weight: bold; background: black");
 import { LitElement, html, css } from "https://unpkg.com/lit-element@2.4.0/lit-element.js?module";
 
 class QinhuaGasEditor extends LitElement {
@@ -1445,8 +1445,8 @@ class QinhuaGasCard extends LitElement {
       
       .usage-cost {
         position: absolute;
-        left: 50%;
-        text-align: left;
+        right: 0;
+        text-align: right;
       }
       
       .usage-bar {
@@ -1907,37 +1907,148 @@ class QinhuaGasCard extends LitElement {
     const selectedEntity = this.hass.states[selectedEntityId];
 
     if (!selectedEntity?.attributes?.daylist) return null;
-    const daylist = selectedEntity.attributes.daylist.slice(0, 30);
-    const currentDay = daylist[0] || {};
+    const daylist = selectedEntity.attributes.daylist;
+
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 0-based
+    const currentDay = now.getDate();
+    const daysInCurrentMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+
+    // 构建本月数据映射 day => item，同时找到本月最后有数据的日期
+    const currentMonthMap = {};
+    let lastDataDay = 0;
+    daylist.forEach(item => {
+      if (!item?.day) return;
+      const d = new Date(item.day.split(' ')[0]);
+      if (d.getFullYear() === currentYear && d.getMonth() === currentMonth) {
+        currentMonthMap[d.getDate()] = item;
+        if (d.getDate() > lastDataDay) lastDataDay = d.getDate();
+      }
+    });
+    // 如果没有本月数据，回退到当前日期
+    if (lastDataDay === 0) lastDataDay = currentDay;
+
+    // 构建上月数据映射 day => item
+    const lastMonthMap = {};
+    daylist.forEach(item => {
+      if (!item?.day) return;
+      const d = new Date(item.day.split(' ')[0]);
+      if (d.getFullYear() === currentYear && d.getMonth() === currentMonth - 1) {
+        lastMonthMap[d.getDate()] = item;
+      }
+      // 处理1月时上年是12月的情况
+      if (currentMonth === 0 && d.getFullYear() === currentYear - 1 && d.getMonth() === 11) {
+        lastMonthMap[d.getDate()] = item;
+      }
+    });
+
+    // 上月天数，用于处理上月不足天数时的回退
+    const lastMonthDays = new Date(currentYear, currentMonth, 0).getDate();
+
+    // 计算本月已过天数中，与上月同期各指标的日平均差值
+    let curGasSum = 0, curCostSum = 0;
+    let lastGasSum = 0, lastCostSum = 0;
+    let comparedDays = 0;
+    for (let d = 1; d <= lastDataDay; d++) {
+      const curItem = currentMonthMap[d];
+      const lastItem = lastMonthMap[d];
+      if (curItem) {
+        curGasSum += Number(curItem.dayEleNum) || 0;
+        curCostSum += Number(curItem.dayEleCost) || 0;
+        if (lastItem) {
+          lastGasSum += Number(lastItem.dayEleNum) || 0;
+          lastCostSum += Number(lastItem.dayEleCost) || 0;
+        }
+        comparedDays++;
+      }
+    }
+    const avgDiffGas = comparedDays > 0 ? (curGasSum - lastGasSum) / comparedDays : 0;
+    const avgDiffCost = comparedDays > 0 ? (curCostSum - lastCostSum) / comparedDays : 0;
+
+    // 按1-31天生成数据，优先本月，无则用上月
+    const categories = [];
+    const gasData = [], costData = [];
+    const gasIsLast = [], costIsLast = [];
+    const gasIsEstimate = [], costIsEstimate = [];
+
+    for (let day = 1; day <= daysInCurrentMonth; day++) {
+      categories.push(day);
+      const curItem = currentMonthMap[day];
+      const lastItem = lastMonthMap[day];
+      // 上月不足天数时，用当前月（上月之后的月）对应日期回退
+      const overflowDay = day > lastMonthDays ? day - lastMonthDays : null;
+      const overflowItem = overflowDay !== null ? currentMonthMap[overflowDay] : null;
+      const isFuture = day > lastDataDay;
+
+      // 用气量
+      if (curItem && day <= lastDataDay) {
+        gasData.push(Number(curItem.dayEleNum) || 0);
+        gasIsLast.push(false);
+        gasIsEstimate.push(false);
+      } else if (isFuture && lastItem) {
+        gasData.push(Math.max(0, (Number(lastItem.dayEleNum) || 0) + avgDiffGas));
+        gasIsLast.push(true);
+        gasIsEstimate.push(true);
+      } else if (isFuture && overflowItem) {
+        gasData.push(Math.max(0, (Number(overflowItem.dayEleNum) || 0) + avgDiffGas));
+        gasIsLast.push(true);
+        gasIsEstimate.push(true);
+      } else if (lastItem) {
+        gasData.push(Number(lastItem.dayEleNum) || 0);
+        gasIsLast.push(true);
+        gasIsEstimate.push(false);
+      } else if (overflowItem) {
+        gasData.push(Number(overflowItem.dayEleNum) || 0);
+        gasIsLast.push(true);
+        gasIsEstimate.push(false);
+      } else {
+        gasData.push(0);
+        gasIsLast.push(false);
+        gasIsEstimate.push(false);
+      }
+
+      // 气费
+      if (curItem && day <= lastDataDay) {
+        costData.push(Number(curItem.dayEleCost) || 0);
+        costIsLast.push(false);
+        costIsEstimate.push(false);
+      } else if (isFuture && lastItem) {
+        costData.push(Math.max(0, (Number(lastItem.dayEleCost) || 0) + avgDiffCost));
+        costIsLast.push(true);
+        costIsEstimate.push(true);
+      } else if (isFuture && overflowItem) {
+        costData.push(Math.max(0, (Number(overflowItem.dayEleCost) || 0) + avgDiffCost));
+        costIsLast.push(true);
+        costIsEstimate.push(true);
+      } else if (lastItem) {
+        costData.push(Number(lastItem.dayEleCost) || 0);
+        costIsLast.push(true);
+        costIsEstimate.push(false);
+      } else if (overflowItem) {
+        costData.push(Number(overflowItem.dayEleCost) || 0);
+        costIsLast.push(true);
+        costIsEstimate.push(false);
+      } else {
+        costData.push(0);
+        costIsLast.push(false);
+        costIsEstimate.push(false);
+      }
+    }
+
+    // 本月当前日期数据（优先取本月今天，否则取daylist最新一条）
+    const currentDayItem = currentMonthMap[currentDay] || daylist[0] || {};
+
     return {
-      tip: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: 0
-      })),
-      peak: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: 0
-      })),
-      normal: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: Number(item.dayEleNum) || 0
-      })),
-      valley: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: 0
-      })),
-      total: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: Number(item.dayEleNum) || 0
-      })),
-      cost: daylist.map(item => ({
-        x: new Date(item.day.split(' ')[0]).getTime(),
-        y: Number(item.dayEleCost) || 0
-      })),
+      categories,
+      gas: gasData, cost: costData,
+      gasIsLast, costIsLast,
+      gasIsEstimate, costIsEstimate,
+      lastDataDay,
       current: {
-        ele: currentDay.dayEleNum || 0,
-        cost: currentDay.dayEleCost || 0,
-        days: daylist.length
+        ele: Number(currentDayItem.dayEleNum) || 0,
+        cost: Number(currentDayItem.dayEleCost) || 0,
+        days: currentDay
       }
     };
   }
@@ -1955,55 +2066,51 @@ class QinhuaGasCard extends LitElement {
 
     if (!selectedEntity?.attributes?.monthlist) return null;
 
-    // 构建12个月的数据（1月-12月），无数据的月份填0
     const lastYearBills = selectedEntity.attributes.monthlist.filter(item =>
       item?.month && item.month.startsWith(lastYear)
     ) || [];
     const thisYearBills = selectedEntity.attributes.monthlist.filter(item =>
       item?.month && item.month.startsWith(currentYear)
     ) || [];
+    const lastmonthlist = [...lastYearBills].slice(0, 12).reverse();
+    const monthlist = [...thisYearBills].slice(0, 12).reverse();
+    const lastmonthlistDay = [...lastYearBills][0];
+    const monthlistDay = [...thisYearBills][0];
 
-    // 按月建立查找表
-    const lastYearMap = {};
-    lastYearBills.forEach(item => {
-      const m = parseInt(item.month.split("-")[1], 10);
-      lastYearMap[m] = item;
-    });
-    const thisYearMap = {};
-    thisYearBills.forEach(item => {
-      const m = parseInt(item.month.split("-")[1], 10);
-      thisYearMap[m] = item;
-    });
-
-    // 本年最新月数据
-    const currentMonth = new Date().getMonth() + 1;
-    const monthlistDay = thisYearMap[currentMonth] || thisYearBills[thisYearBills.length - 1] || null;
-    const lastmonthlistDay = lastYearMap[currentMonth] || lastYearBills[lastYearBills.length - 1] || null;
-
-    // 生成1-12月数据
-    const months = Array.from({length: 12}, (_, i) => i + 1);
     return {
-      tip: months.map(() => 0),
-      peak: months.map(() => 0),
-      normal: months.map(m => Number(thisYearMap[m]?.monthEleNum) || 0),
-      valley: months.map(() => 0),
-      total: months.map(m => Number(thisYearMap[m]?.monthEleNum) || 0),
-      cost: months.map(m => Number(thisYearMap[m]?.monthEleCost) || 0),
+      gas: monthlist.map(item => ({
+        x: new Date(item.month.substr(0,7)+'-01').getTime(),
+        y: Number(item.monthEleNum) || 0
+      })),
+      total: monthlist.map(item => ({
+        x: new Date(item.month.substr(0,7)+'-01').getTime(),
+        y: Number(item.monthEleNum) || 0
+      })),
+      cost: monthlist.map(item => ({
+        x: new Date(item.month.substr(0,7)+'-01').getTime(),
+        y: Number(item.monthEleCost) || 0
+      })),
       current: {
         ele: monthlistDay?.monthEleNum || 0,
         cost: monthlistDay?.monthEleCost || 0,
-        days: thisYearBills.length
+        days: monthlist.length
       },
-      lasttip: months.map(() => 0),
-      lastpeak: months.map(() => 0),
-      lastnormal: months.map(m => Number(lastYearMap[m]?.monthEleNum) || 0),
-      lastvalley: months.map(() => 0),
-      lasttotal: months.map(m => Number(lastYearMap[m]?.monthEleNum) || 0),
-      lastcost: months.map(m => Number(lastYearMap[m]?.monthEleCost) || 0),
+      lastgas: lastmonthlist.map(item => ({
+        x: new Date(`${currentYear}-${item.month.split("-")[1]}-01`).getTime(),
+        y: Number(item.monthEleNum) || 0
+      })),
+      lasttotal: lastmonthlist.map(item => ({
+        x: new Date(`${currentYear}-${item.month.split("-")[1]}-01`).getTime(),
+        y: Number(item.monthEleNum) || 0
+      })),
+      lastcost: lastmonthlist.map(item => ({
+        x: new Date(`${currentYear}-${item.month.split("-")[1]}-01`).getTime(),
+        y: Number(item.monthEleCost) || 0
+      })),
       lastcurrent: {
         ele: lastmonthlistDay?.monthEleNum || 0,
         cost: lastmonthlistDay?.monthEleCost || 0,
-        days: lastYearBills.length
+        days: lastmonthlist.length
       }
     };
   }
@@ -2141,26 +2248,42 @@ class QinhuaGasCard extends LitElement {
     const Color = theme === 'on' ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)';
     const BgColor = theme === 'on' ? 'rgb(255, 255, 255)' : 'rgb(50, 50, 50)';
 
-    // 计算总用气量的最大值
-    const totalValues = data.total.map(item => item.y);
-    const maxTotal = totalValues.length > 0 ? Math.max(...totalValues) : 0;
-    const maxTotalPoint = data.total.find(item => item.y === maxTotal);
+    // 计算用气量的最大值
+    const maxGas = data.gas.length > 0 ? Math.max(...data.gas) : 0;
+    const maxGasIndex = data.gas.indexOf(maxGas);
+    // 计算气费的最大值
+    const maxCost = data.cost.length > 0 ? Math.max(...data.cost) : 0;
 
     const colorCost = this.colorCost;
     const colorNum = this.colorNum;
 
-    const colorNormal = '#4CAF50';  // 用气量 - 绿色
+    // 用气量颜色
+    const colorGas = '#4CAF50';  // 绿色
+    const colorLastGas = '#4CAF5040';  // 上月用气量
+    const colorLastCost = this.colorCost + '40';
+
+    // 为每个柱子生成带颜色的数据：上月数据用透明色
+    const gasSeriesData = data.gas.map((y, i) => ({
+      x: data.categories[i],
+      y: y,
+      fillColor: data.gasIsLast[i] ? colorLastGas : colorGas
+    }));
+    const costSeriesData = data.cost.map((y, i) => ({
+      x: data.categories[i],
+      y: y,
+      fillColor: data.costIsLast[i] ? colorLastCost : colorCost
+    }));
 
     return {
       series: [
         {
           name: '用气量',
-          data: data.normal,
+          data: gasSeriesData,
           type: 'column'
         },
         {
           name: '日气费',
-          data: data.cost,
+          data: costSeriesData,
           type: 'line',
           color: colorCost
         }
@@ -2170,7 +2293,7 @@ class QinhuaGasCard extends LitElement {
         height: 230,
         width: '100%',
         foreColor: Color,
-        stacked: false,
+        stacked: true,
         toolbar: { show: false },
         animations: {
           enabled: true,
@@ -2188,7 +2311,7 @@ class QinhuaGasCard extends LitElement {
         bar: {
           horizontal: false,
           borderRadius: 0,
-          columnWidth: '30%',
+          columnWidth: '60%',
           barHeight: '70%',
           distributed: false,
           stacking: 'normal',
@@ -2215,8 +2338,8 @@ class QinhuaGasCard extends LitElement {
           }
         }
       },
-      colors: [colorNormal, colorCost],
-      stroke: { width: [0, 2], curve: 'smooth' },
+      colors: [colorGas, colorCost],
+      stroke: { width: [0, 0, 0, 0, 2], curve: 'smooth' },
       markers: {
         size: 3,
         strokeWidth: 1,
@@ -2227,17 +2350,19 @@ class QinhuaGasCard extends LitElement {
         enabled: false
       },
       xaxis: {
-        type: 'datetime',
+        type: 'category',
+        tickAmount: data.categories.length - 1,
         labels: {
-          datetimeFormatter: {
-            day: 'MM-dd',
-            month: 'MM-dd',
-            year: 'MM-dd'
-          },
+          rotate: 0,
           style: {
             fontSize: '10px',
           },
-          hideOverlappingLabels: true
+          hideOverlappingLabels: true,
+          showDuplicates: false,
+          formatter: function(val) {
+            const day = parseInt(val);
+            return day % 2 === 1 ? String(day) : '';
+          }
         },
         tooltip: {
           enabled: false
@@ -2245,6 +2370,7 @@ class QinhuaGasCard extends LitElement {
       },
       yaxis: {
         min: 0,
+        max: maxCost > 0 ? Math.ceil(maxCost / 0.5) * 0.5 + 0.5 : undefined,
         floating: false,
         labels: {
           minWidth: 5,
@@ -2277,11 +2403,11 @@ class QinhuaGasCard extends LitElement {
           const points = [];
 
           // 标记最大用气量
-          if (maxTotalPoint) {
+          if (maxGasIndex >= 0 && maxGas > 0) {
             points.push({
-              x: maxTotalPoint.x,
-              y: maxTotalPoint.y,
-              seriesIndex: 0,
+              x: maxGasIndex,
+              y: maxGas,
+              seriesIndex: 3,
               marker: {
                 size: 0
               },
@@ -2295,14 +2421,14 @@ class QinhuaGasCard extends LitElement {
                   fontSize: '12px',
                   fontWeight: 'bold'
                 },
-                text: `${maxTotal.toFixed(2)}m³`
+                text: `${maxGas.toFixed(2)}m³`
               }
             });
 
             points.push({
-              x: maxTotalPoint.x,
-              y: maxTotalPoint.y,
-              seriesIndex: 0,
+              x: maxGasIndex,
+              y: maxGas,
+              seriesIndex: 3,
               marker: {
                 size: 4,
                 offsetX: 0,
@@ -2331,22 +2457,22 @@ class QinhuaGasCard extends LitElement {
       tooltip: {
         shared: true,
         intersect: false,
-        custom: function({ series, seriesIndex, dataPointIndex, w }) {
-          // 使用鼠标悬停位置对应的x值
-          const hoverX = w.globals.seriesX[seriesIndex]?.[dataPointIndex];
-          const currentDate = new Date(hoverX);
-          const formattedDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
+        custom: function({ series, dataPointIndex }) {
+          // 类别轴，dataPointIndex对应1-31
+          const day = dataPointIndex + 1;
+          const now = new Date();
+          const currentMonth = now.getMonth() + 1;
+          const currentYear = now.getFullYear();
+          // 判断该天是否为预计数据（超过数据最后一天一律为预计）
+          const isEstimate = day > data.lastDataDay;
 
-          // 日图表series顺序：0用气量,1日气费
-          const seriesInfo = [
-            { name: '用气量', unit: 'm³', color: colorNormal, seriesIndex: 0 },
-            { name: '日气费', unit: '元', color: colorCost, seriesIndex: 1 }
-          ];
+          const formattedDate = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const dateLabel = isEstimate ? `${formattedDate} 预计` : formattedDate;
 
           let tooltipHTML = `
             <div style="background: ${BgColor};color: ${Color};padding: 8px;border-radius: 4px;border: 1px solid ${Color};">
               <div style="font-weight: bold; font-size: 12px;color: ${Color};  border-bottom: 1px dashed #999;">
-                ${formattedDate}
+                ${dateLabel}
               </div>
           `;
 
@@ -2364,22 +2490,19 @@ class QinhuaGasCard extends LitElement {
             `;
           }
 
-          // 遍历seriesInfo数组显示数据
-          seriesInfo.forEach((info) => {
-            const value = series[info.seriesIndex]?.[dataPointIndex];
-            // 气费数据总是显示（即使为0），其他数据只在非0时显示
-            if (value !== null && value !== undefined && (value !== 0 || info.unit === '元')) {
-              tooltipHTML += `
-                <div style="display: flex;align-items: center;margin: 0;font-size: 12px;border-bottom: 1px dashed #999;">
-                  <span style="display: inline-block;width: 8px;height: 8px;background: ${info.color};border-radius: 50%;margin-right: 5px;"></span>
-                  <span style="color: ${info.color}">
-                    ${info.name}:
-                    <strong>${value.toFixed(2)} ${info.unit}</strong>
-                  </span>
-                </div>
-              `;
-            }
-          });
+          // 显示气费
+          const costValue = series[1]?.[dataPointIndex];
+          if (costValue !== null && costValue !== undefined) {
+            tooltipHTML += `
+              <div style="display: flex;align-items: center;margin: 0;font-size: 12px;border-bottom: 1px dashed #999;">
+                <span style="display: inline-block;width: 8px;height: 8px;background: ${colorCost};border-radius: 50%;margin-right: 5px;"></span>
+                <span style="color: ${colorCost}">
+                  日气费:
+                  <strong>${costValue.toFixed(2)} 元</strong>
+                </span>
+              </div>
+            `;
+          }
 
           tooltipHTML += `</div>`;
           return tooltipHTML;
@@ -2387,8 +2510,12 @@ class QinhuaGasCard extends LitElement {
       },
       legend: {
         position: 'bottom',
-        formatter: function(seriesName) {
-          return seriesName;
+        showForNullSeries: false,
+        showForZeroSeries: false,
+        formatter: function(seriesName, opts) {
+          const seriesData = opts.w.globals.series[opts.seriesIndex];
+          const hasData = seriesData && seriesData.some(val => val !== 0 && val !== null && val !== undefined);
+          return hasData ? seriesName : '';
         },
         markers: {
           width: 10,
@@ -2413,49 +2540,51 @@ class QinhuaGasCard extends LitElement {
     const Color = theme === 'on' ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)';
     const BgColor = theme === 'on' ? 'rgb(255, 255, 255)' : 'rgb(50, 50, 50)';
     
-    // 计算总用气量的最大值
-    const totalValues = data.total;
+    // 计算本年用气量最大值
+    const totalValues = data.total.map(item => item.y);
     const maxTotal = totalValues.length > 0 ? Math.max(...totalValues) : 0;
-    const maxTotalIndex = totalValues.indexOf(maxTotal);
+    const maxTotalPoint = data.total.find(item => item.y === maxTotal);
+
+    // 计算本年气费最大值
+    const costValues = data.cost.map(item => item.y);
+    const maxCost = costValues.length > 0 ? Math.max(...costValues) : 0;
+
+    // 计算上年用气量最大值
+    const lasttotalValues = data.lasttotal.map(item => item.y);
+    const maxLastTotal = lasttotalValues.length > 0 ? Math.max(...lasttotalValues) : 0;
+
+    // 计算上年气费最大值
+    const lastcostValues = data.lastcost.map(item => item.y);
+    const maxLastCost = lastcostValues.length > 0 ? Math.max(...lastcostValues) : 0;
 
     const colorCost = this.colorCost;
     const colorNum = this.colorNum;
 
-    // 燃气颜色
-    const colorNormal = '#4CAF50';  // 用气量 - 绿色
-    const colorLastNormal = '#4CAF5080';  // 上年用气量
+    // 用气量颜色
+    const colorGas = '#4CAF50';  // 绿色
+    const colorLastGas = '#4CAF5080';  // 上年用气量
 
-    const monthLabels = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+    // 修改数据结构：为上年数据偏移时间，实现并列显示
+    const offsetMs = 12 * 24 * 60 * 60 * 1000; // 12天的偏移
+
+    const lastgasOffset = data.lastgas.map(item => ({ x: item.x - offsetMs, y: item.y }));
+    const lastcostOffset = data.lastcost.map(item => ({ x: item.x - offsetMs, y: item.y }));
+
+    // 动态构建series，只包含有数据的系列
+    const hasDataInSeries = (arr) => arr && arr.some(item => item.y > 0);
+    const seriesList = [];
+    
+    if (hasDataInSeries(lastgasOffset)) seriesList.push({ name: '上年用气量', data: lastgasOffset, type: 'column' });
+    if (hasDataInSeries(data.gas)) seriesList.push({ name: '本年用气量', data: data.gas, type: 'column' });
+    if (hasDataInSeries(lastcostOffset)) seriesList.push({ name: '上年气费', data: lastcostOffset, type: 'line', color: '#f3066040' });
+    if (hasDataInSeries(data.cost)) seriesList.push({ name: '本年气费', data: data.cost, type: 'line', color: colorCost });
 
     return {
-      series: [
-        {
-          name: '上年用气量',
-          data: data.lastnormal,
-          type: 'column'
-        },
-        {
-          name: '本年用气量',
-          data: data.normal,
-          type: 'column'
-        },
-        {
-          name: '上年气费',
-          data: data.lastcost,
-          type: 'line',
-          color: '#f3066080'
-        },
-        {
-          name: '本年气费',
-          data: data.cost,
-          type: 'line',
-          color: colorCost
-        }
-      ],      
+      series: seriesList,         
       markers: {
         size: 3,
         strokeWidth: 1,
-        colors: ['#f3066080', colorCost],
+        colors: ['#f3066040', colorCost],
         strokeColors: "#fff"
       },
       chart: {
@@ -2463,7 +2592,7 @@ class QinhuaGasCard extends LitElement {
         height: 230,
         width: '100%',
         foreColor: Color,
-        stacked: false,
+        stacked: true,
         toolbar: { show: false },
         animations: {
           enabled: true,
@@ -2508,22 +2637,34 @@ class QinhuaGasCard extends LitElement {
           }
         }
       },
-      colors: [
-        colorLastNormal, colorNormal, '#f3066080', colorCost
-      ],
-      stroke: { width: [0, 0, 2, 2], curve: 'smooth' },
+      colors: seriesList.map(s => {
+        const colorMap = {
+          '上年用气量': colorLastGas, '本年用气量': colorGas,
+          '上年气费': '#f3066040', '本年气费': colorCost
+        };
+        return colorMap[s.name] || s.color || '#999';
+      }),
+      stroke: { width: seriesList.map(s => s.type === 'line' ? 2 : 0), curve: 'smooth' },
       markers: {
         size: 3,
         strokeWidth: 1,
-        colors: ['#f3066080', colorCost],
+        colors: ['#f3066040', colorCost],
         strokeColors: "#fff"
       },
       dataLabels: {
         enabled: false
       },
       xaxis: {
-        categories: monthLabels,
+        type: 'datetime',
+        min: new Date(`${new Date().getFullYear()}-01-01`).getTime() - 15 * 24 * 60 * 60 * 1000,
+        max: new Date(`${new Date().getFullYear()}-12-01`).getTime(),
+        tickAmount: 11,
         labels: {
+          datetimeFormatter: {
+            day: 'M月',
+            month: 'M月',
+            year: 'M月'
+          },
           style: {
             fontSize: '10px',
           },
@@ -2535,6 +2676,7 @@ class QinhuaGasCard extends LitElement {
       },
       yaxis: {
         min: 0,
+        max: Math.max(maxCost, maxLastCost) > 0 ? Math.ceil(Math.max(maxCost, maxLastCost) / 5) * 5 + 5 : undefined,
         floating: false,
         labels: {
           minWidth: 10,
@@ -2566,12 +2708,13 @@ class QinhuaGasCard extends LitElement {
         points: (() => {
           const points = [];
 
-          // 标记最大用气量
-          if (maxTotal > 0 && maxTotalIndex >= 0) {
+          // 标记最大用气量（动态查找气费系列索引）
+          const costSeriesIdx = seriesList.findIndex(s => s.name === '本年气费');
+          if (maxTotalPoint) {
             points.push({
-              x: maxTotalIndex,
-              y: maxTotal,
-              seriesIndex: 1,
+              x: maxTotalPoint.x,
+              y: maxTotalPoint.y,
+              seriesIndex: costSeriesIdx >= 0 ? costSeriesIdx : 0,
               marker: {
                 size: 0
               },
@@ -2590,9 +2733,9 @@ class QinhuaGasCard extends LitElement {
             });
 
             points.push({
-              x: maxTotalIndex,
-              y: maxTotal,
-              seriesIndex: 1,
+              x: maxTotalPoint.x,
+              y: maxTotalPoint.y,
+              seriesIndex: costSeriesIdx >= 0 ? costSeriesIdx : 0,
               marker: {
                 size: 4,
                 offsetX: 0,
@@ -2622,36 +2765,31 @@ class QinhuaGasCard extends LitElement {
         shared: true,
         intersect: false,
         custom: function({ series, seriesIndex, dataPointIndex, w }) {
-          const monthLabel = monthLabels[dataPointIndex] || '';
+          const hoverX = w.globals.seriesX[seriesIndex]?.[dataPointIndex];
+          const currentDate = new Date(hoverX);
+          const monthLabel = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
           const lastYear = (new Date().getFullYear() - 1).toString();
           const currentYear = new Date().getFullYear().toString();
-
-          // series顺序：0上年用气量,1本年用气量,2上年气费,3本年气费
-          const seriesInfo = [
-            { name: '上年用气量', unit: 'm³', color: colorLastNormal, seriesIndex: 0 },
-            { name: '本年用气量', unit: 'm³', color: colorNormal, seriesIndex: 1 },
-            { name: '上年气费', unit: '元', color: '#f3066080', seriesIndex: 2 },
-            { name: '本年气费', unit: '元', color: colorCost, seriesIndex: 3 },
-          ];
 
           let tooltipHTML = `
             <div style="background: ${BgColor};color: ${Color};padding: 8px;border-radius: 4px;border: 1px solid ${Color};">
               <div style="font-weight: bold; font-size: 12px;color: ${Color};  border-bottom: 1px dashed #999;">
-                ${lastYear}/${currentYear} ${monthLabel}
+                ${monthLabel}
               </div>
           `;
 
-          // 遍历seriesInfo数组显示数据
-          seriesInfo.forEach((info) => {
-            const value = series[info.seriesIndex]?.[dataPointIndex];
-            // 气费数据总是显示（即使为0），其他数据只在非0时显示
-            if (value !== null && value !== undefined && (value !== 0 || info.unit === '元')) {
+          // 动态遍历seriesList显示数据
+          seriesList.forEach((s, idx) => {
+            const value = series[idx]?.[dataPointIndex];
+            const unit = s.name.includes('气费') ? '元' : 'm³';
+            if (value !== null && value !== undefined && (value !== 0 || unit === '元')) {
+              const seriesColor = s.color || (s.name.includes('上年') ? colorLastGas : colorGas);
               tooltipHTML += `
                 <div style="display: flex;align-items: center;margin: 0;font-size: 12px;border-bottom: 1px dashed #999;">
-                  <span style="display: inline-block;width: 8px;height: 8px;background: ${info.color};border-radius: 50%;margin-right: 5px;"></span>
-                  <span style="color: ${info.color}">
-                    ${info.name}:
-                    <strong>${value.toFixed(2)} ${info.unit}</strong>
+                  <span style="display: inline-block;width: 8px;height: 8px;background: ${seriesColor};border-radius: 50%;margin-right: 5px;"></span>
+                  <span style="color: ${seriesColor}">
+                    ${s.name}:
+                    <strong>${value.toFixed(2)} ${unit}</strong>
                   </span>
                 </div>
               `;
@@ -2665,8 +2803,12 @@ class QinhuaGasCard extends LitElement {
 
       legend: {
         position: 'bottom',
-        formatter: function(seriesName) {
-          return seriesName;
+        showForNullSeries: false,
+        showForZeroSeries: false,
+        formatter: function(seriesName, opts) {
+          const seriesData = opts.w.globals.series[opts.seriesIndex];
+          const hasData = seriesData && seriesData.some(val => val !== 0 && val !== null && val !== undefined);
+          return hasData ? seriesName : '';
         },
         markers: {
           width: 10,
@@ -2763,11 +2905,11 @@ class QinhuaGasCard extends LitElement {
       <div class="usage-bar">
         <div class="usage-bar-fill">
           <div class="usage-bar-segment normal" style="width: 100%"></div>
-          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total}</div>
+          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total} m³</div>
         </div>
       </div>
       <div class="usage-labels">
-        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">用气</div>
+        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;"> </div>
       </div>
     `;
   }
@@ -2785,11 +2927,11 @@ class QinhuaGasCard extends LitElement {
       <div class="usage-bar">
         <div class="usage-bar-fill">
           <div class="usage-bar-segment normal" style="width: 100%"></div>
-          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total}</div>
+          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total} m³</div>
         </div>
       </div>
       <div class="usage-labels">
-        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">用气</div>
+        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;"> </div>
       </div>
     `;
   }
@@ -2806,11 +2948,11 @@ class QinhuaGasCard extends LitElement {
       <div class="usage-bar">
         <div class="usage-bar-fill">
           <div class="usage-bar-segment normal" style="width: 100%"></div>
-          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total}</div>
+          <div class="usage-bar-text normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">${total} m³</div>
         </div>
       </div>
       <div class="usage-labels">
-        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;">用气</div>
+        <div class="usage-label normal" style="color: ${Color}; text-shadow: ${Shadow};--normal-width: 100%; left: 0;"> </div>
       </div>
     `;
   }
@@ -3423,7 +3565,7 @@ class QinhuaGasCard extends LitElement {
         <div class="usage-grid">
           <div class="usage-section" style="background: ${BgColor2};">
             <div class="usage-title" style="color: ${Color2}; text-shadow: ${Shadow};">
-              <ha-icon icon="mdi:flash" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
+              <ha-icon icon="mdi:fire" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
               近日用气
             </div>
             ${currentDayUsage ? html`
@@ -3437,7 +3579,7 @@ class QinhuaGasCard extends LitElement {
           
           <div class="usage-section" style="background: ${BgColor2}">
             <div class="usage-title" style="color: ${Color2}; text-shadow: ${Shadow};">
-              <ha-icon icon="mdi:flash" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
+              <ha-icon icon="mdi:fire" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
               本月用气
             </div>
             ${currentMonthUsage ? html`
@@ -3451,7 +3593,7 @@ class QinhuaGasCard extends LitElement {
           
           <div class="usage-section" style="background: ${BgColor2}">
             <div class="usage-title" style="color: ${Color2}; text-shadow: ${Shadow};">
-              <ha-icon icon="mdi:flash" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
+              <ha-icon icon="mdi:fire" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
               上月用气
             </div>
             ${previousMonthUsage ? html`
@@ -3465,7 +3607,7 @@ class QinhuaGasCard extends LitElement {
           
           <div class="usage-section" style="background: ${BgColor2}">
             <div class="usage-title" style="color: ${Color2}; text-shadow: ${Shadow};">
-              <ha-icon icon="mdi:flash" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
+              <ha-icon icon="mdi:fire" style="color: ${Color2}; --mdc-icon-size: 12px; margin: 0 1px; vertical-align: middle;"></ha-icon>
               本年用气
             </div>
             ${yearUsage ? html`
@@ -3524,7 +3666,7 @@ class QinhuaGasCard extends LitElement {
                   })()}
 
                   ${isprepaid !== '是' ? html`
-                    <div class="balance-label">气费余额</div>
+                    <div class="balance-label">燃气费余额</div>
                   ` : html`
                     <div class="balance-label">上月气费</div>
                   `}

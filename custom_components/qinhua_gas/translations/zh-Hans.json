@@ -12,6 +12,19 @@
           "token_current_month": "本月用量Token",
           "token_last_month": "上月用量Token"
         }
+      },
+      "billing_config": {
+        "title": "计费标准配置",
+        "description": "请配置燃气阶梯计费参数",
+        "data": {
+          "is_prepaid": "是否预付费",
+          "year_ladder_start": "年阶梯起始日期（格式：MMDD，如0101表示1月1日）",
+          "ladder_level_1": "年阶梯第2档起始用气量(m³)",
+          "ladder_level_2": "年阶梯第3档起始用气量(m³)",
+          "ladder_price_1": "年阶梯第1档气价(元/m³)",
+          "ladder_price_2": "年阶梯第2档气价(元/m³)",
+          "ladder_price_3": "年阶梯第3档气价(元/m³)"
+        }
       }
     },
     "error": {
@@ -22,14 +35,21 @@
     "step": {
       "init": {
         "title": "修改秦华燃气配置",
-        "description": "请修改您的燃气卡信息和token",
+        "description": "请修改您的燃气卡信息、token和计费参数",
         "data": {
           "card_id": "燃气卡号",
           "user_name": "用户姓名",
           "now_price": "燃气单价",
           "token_account": "账户信息Token",
           "token_current_month": "本月用量Token",
-          "token_last_month": "上月用量Token"
+          "token_last_month": "上月用量Token",
+          "is_prepaid": "是否预付费",
+          "year_ladder_start": "年阶梯起始日期（格式：MMDD，如0101表示1月1日）",
+          "ladder_level_1": "年阶梯第2档起始用气量(m³)",
+          "ladder_level_2": "年阶梯第3档起始用气量(m³)",
+          "ladder_price_1": "年阶梯第1档气价(元/m³)",
+          "ladder_price_2": "年阶梯第2档气价(元/m³)",
+          "ladder_price_3": "年阶梯第3档气价(元/m³)"
         }
       }
     }

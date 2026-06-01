@@ -6,8 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.components.http import StaticPathConfig
-from homeassistant.components.frontend import add_extra_js_url
+
 
 from .const import DOMAIN
 
@@ -16,28 +15,10 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the Qinghua Gas component."""
-    await setup_qinhua_gas_card(hass)
-    return True
-
-
-async def setup_qinhua_gas_card(hass: HomeAssistant) -> bool:
-    """注册燃气卡片前端资源."""
-    card_path = '/qinhua_gas-local'
-    await hass.http.async_register_static_paths([
-        StaticPathConfig(card_path, hass.config.path('custom_components/qinhua_gas/www'), False)
-    ])
-    _LOGGER.debug("register_static_path: %s", card_path + ':custom_components/qinhua_gas/www')
-    add_extra_js_url(hass, card_path + "/qinhua-gas-card.js")
-    return True
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Qinghua Gas from a config entry."""
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = dict(entry.data)
 
-    await setup_qinhua_gas_card(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(update_listener))
     return True

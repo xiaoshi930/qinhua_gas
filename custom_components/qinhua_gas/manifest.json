@@ -1,11 +1,11 @@
 {
-  "domain": "xian_water",
-  "name": "西安水费",
-  "documentation": "https://github.com/xiaoshi930i/xian_water",
+  "domain": "qinhua_gas",
+  "name": "秦华燃气",
+  "documentation": "https://github.com/xiaoshi930/qinhua_gas",
   "dependencies": [],
   "codeowners": ["xiaoshi930"],
   "requirements": ["aiohttp"],
   "config_flow": true,
   "iot_class": "cloud_polling",
-  "version": "1.4"
+  "version": "1.8"
 }

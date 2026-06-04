@@ -1,12 +1,13 @@
-"""Sensor platform for 西安水务 integration."""
+"""Sensor platform for Qinghua Gas integration."""
 from __future__ import annotations
 
+import json
 import logging
 import math
-import random
 from datetime import datetime, timedelta
 from typing import Any
 
+import aiohttp
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -15,22 +16,25 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     DOMAIN,
-    CONF_CLIENT_CODE,
-    TIER_LEVEL_1,
-    TIER_LEVEL_2,
-    TIER_PRICE_1,
-    TIER_PRICE_2,
-    TIER_PRICE_3,
-    RECHARGE_RECORDS,
+    CONF_IS_PREPAID,
+    CONF_LADDER_LEVEL_1,
+    CONF_LADDER_LEVEL_2,
+    CONF_LADDER_PRICE_1,
+    CONF_LADDER_PRICE_2,
+    CONF_LADDER_PRICE_3,
+    CONF_YEAR_LADDER_START,
 )
-from .storage import XianWaterStorage
+from .storage import QinhuaGasStorage
 
 _LOGGER = logging.getLogger(__name__)
 
-# 默认日均用水量 (m³)
-DEFAULT_DAILY_VOLUME = 0.38
-# 随机波动范围
-VARIATION_RANGE = 0.15
+# 燃气阶梯默认值
+DEFAULT_LADDER_LEVEL_1 = 480
+DEFAULT_LADDER_LEVEL_2 = 660
+DEFAULT_LADDER_PRICE_1 = 2.18
+DEFAULT_LADDER_PRICE_2 = 2.62
+DEFAULT_LADDER_PRICE_3 = 3.27
+DEFAULT_YEAR_LADDER_START = "0101"
 
 
 async def async_setup_entry(
@@ -38,15 +42,14 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the 西安水务 sensor platform."""
+    """Set up the Qinghua Gas sensor platform."""
     config = entry.data
 
-    coordinator = XianWaterCoordinator(hass, config)
+    coordinator = QinhuaGasCoordinator(hass, config)
     await coordinator.async_load_storage()
     await coordinator.async_config_entry_first_refresh()
 
-    client_code = config.get("client_code", "")
-    sensor = XianWaterSensor(coordinator, config)
+    sensor = QinhuaGasSensor(coordinator, config)
 
     hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
@@ -55,8 +58,8 @@ async def async_setup_entry(
     async_add_entities([sensor], True)
 
 
-class XianWaterCoordinator(DataUpdateCoordinator):
-    """Coordinator for 西安水务 data."""
+class QinhuaGasCoordinator(DataUpdateCoordinator):
+    """Coordinator for Qinghua Gas data."""
 
     def __init__(self, hass: HomeAssistant, config: dict):
         """Initialize the coordinator."""
@@ -68,8 +71,10 @@ class XianWaterCoordinator(DataUpdateCoordinator):
         )
         self.config = config
         self.last_update_time = datetime.now()
-        client_code = config.get("client_code", "default")
-        self._storage = XianWaterStorage(hass, client_code)
+
+        # 初始化持久化存储
+        card_id = config.get("card_id", "default")
+        self._storage = QinhuaGasStorage(hass, card_id)
         self.data = None
 
     async def async_load_storage(self) -> None:
@@ -79,151 +84,297 @@ class XianWaterCoordinator(DataUpdateCoordinator):
             self.data = dict(self._storage.data)
 
     async def _async_update_data(self):
-        """Fetch data - generate fake daily water usage data."""
+        """Fetch data from API."""
         try:
-            day_list = list(self._storage.data.get("dayList", []))
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            card_id = self.config["card_id"]
+            user_name = self.config["user_name"]
+            now_price = self.config["now_price"]
+            token_account = self.config.get("token_account") or self.config.get("token_account", "")
+            token_current_month = self.config.get("token_current_month") or self.config.get("token_current_month", "")
+            token_last_month = self.config.get("token_last_month") or self.config.get("token_last_month", "")
 
-            if not day_list:
-                # 无历史数据，从充值明细最早日期开始生成全部数据
-                day_list = self._generate_all_data()
-            else:
-                # 有历史数据，补充缺失的日期到今天
-                last_day = max(d["day"] for d in day_list)
-                last_date = datetime.strptime(last_day, "%Y-%m-%d")
-                current_date = last_date + timedelta(days=1)
-
-                while current_date <= today:
-                    date_str = current_date.strftime("%Y-%m-%d")
-                    day_data = self._generate_single_day(date_str, day_list)
-                    day_list.append(day_data)
-                    current_date += timedelta(days=1)
-
-            # 计算余额 = 最近一笔充值金额 - 日均消费 × 距今天数
-            records_sorted = sorted(RECHARGE_RECORDS, key=lambda x: x["date"], reverse=True)
-            latest_recharge = float(records_sorted[0]["cost"])
-            latest_recharge_date = datetime.strptime(records_sorted[0]["date"], "%Y-%m-%d")
-            days_since_latest = (today - latest_recharge_date).days
-            # 日均消费：用除最近一笔外的充值总额 / 首尾充值日期间隔
-            other_recharge_total = sum(float(r["cost"]) for r in records_sorted[1:])
-            first_recharge_date = datetime.strptime(records_sorted[-1]["date"], "%Y-%m-%d")
-            recharge_span = abs((latest_recharge_date - first_recharge_date).days)
-            if recharge_span > 0:
-                avg_daily_cost = other_recharge_total / recharge_span
-            else:
-                avg_daily_cost = DEFAULT_DAILY_VOLUME * TIER_PRICE_1
-            balance = round(latest_recharge - avg_daily_cost * days_since_latest, 2)
-
-            # 处理月数据和年数据
-            month_list = self._process_month_data(day_list)
-            year_list = self._process_year_data(month_list)
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            processed = {
-                "date": now_str,
-                "balance": balance,
-                "dayList": day_list,
-                "monthList": month_list,
-                "yearList": year_list,
+            # 请求账户信息
+            account_payload = {
+                "cardId": card_id,
+                "userName": user_name,
+                "nowPrice": now_price,
             }
+            account_data = await self._make_request(
+                account_payload, token_account, "http://wkf.qhgas.com/rs/WX/meterRead"
+            )
 
-            # 持久化存储
-            merged = await self.hass.async_add_executor_job(self._storage.update, processed)
-            self.data = merged
+            # 请求本月用量
+            current_month_payload = {
+                "f_card_id": card_id,
+                "dateType": "本月",
+                "groupname": "day",
+            }
+            current_month_data = await self._make_request(
+                current_month_payload, token_current_month, "http://wkf.qhgas.com/rs/WX/getFulseAnalysis"
+            )
+
+            # 请求上月用量
+            last_month_payload = {
+                "f_card_id": card_id,
+                "dateType": "上月",
+                "groupname": "day",
+            }
+            last_month_data = await self._make_request(
+                last_month_payload, token_last_month, "http://wkf.qhgas.com/rs/WX/getFulseAnalysis"
+            )
+
+            if not account_data:
+                _LOGGER.warning("未获取到账户数据，使用持久化数据")
+                if self._storage.data.get("dayList"):
+                    return dict(self._storage.data)
+                return {}
+
+            # 处理数据
+            processed = self._process_data(account_data, current_month_data, last_month_data)
+
+            # 先更新到持久化存储，再读取到HA
+            if processed:
+                merged = await self.hass.async_add_executor_job(self._storage.update, processed)
+                self.data = merged
+            else:
+                if self._storage.data.get("dayList"):
+                    self.data = dict(self._storage.data)
+                else:
+                    self.data = {}
+
             self.last_update_time = datetime.now()
             return self.data
 
         except Exception as ex:
-            _LOGGER.error("更新水费数据失败: %s", ex)
-            raise UpdateFailed(f"Error updating water data: {ex}")
+            _LOGGER.error("更新燃气数据失败: %s", ex)
+            raise UpdateFailed(f"Error updating gas data: {ex}")
 
-    def _generate_all_data(self) -> list:
-        """从最早充值日期到今天，生成全部伪造的每日用水数据."""
-        records = sorted(RECHARGE_RECORDS, key=lambda x: x["date"])
-        first_recharge_date = datetime.strptime(records[0]["date"], "%Y-%m-%d")
-        # 第一笔充值金额代表之前已用掉的水费，往前推算起始日期
-        first_cost = float(records[0]["cost"])
-        avg_daily_cost = DEFAULT_DAILY_VOLUME * TIER_PRICE_1
-        days_before = int(first_cost / avg_daily_cost)
-        start_date = first_recharge_date - timedelta(days=days_before)
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    async def _make_request(self, data: dict, token: str, url: str) -> dict[str, Any] | None:
+        """Make HTTP request with given data and token."""
+        payload = {
+            "data": data,
+            "tokenS": token,
+        }
+        json_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-        day_list = []
-        current_date = start_date
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    data=json_payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 NetType/WIFI MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090b19) XWEB/14185 Flue",
+                        "Accept": "application/json, text/plain, */*",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Origin": "http://wkf.qhgas.com",
+                        "Accept-Language": "zh-CN,zh;q=0.9",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        response_text = await response.text()
+                        _LOGGER.error("请求失败 status=%s url=%s response=%s", response.status, url, response_text)
+                        return None
+        except aiohttp.ClientError as err:
+            _LOGGER.error("请求错误: %s url=%s", err, url)
+            return None
 
-        while current_date <= today:
-            date_str = current_date.strftime("%Y-%m-%d")
-            day_data = self._generate_single_day(date_str, day_list)
-            day_list.append(day_data)
-            current_date += timedelta(days=1)
+    def _process_data(self, account_data, current_month_data, last_month_data):
+        """Process raw API data into standardized format."""
+        try:
+            # 解析账户信息
+            balance = 0
+            date_str = ""
+            consumer_name = ""
+            if account_data and isinstance(account_data, list) and len(account_data) > 0:
+                first_record = account_data[0]
+                balance = float(first_record.get("f_jval", 0))
+                date_str = first_record.get("f_hand_date", "")
+                # 清理日期末尾的 .0 后缀（如 "2026-05-29 20:10:00.0"）
+                if date_str and date_str.endswith(".0"):
+                    date_str = date_str[:-2]
+                consumer_name = self.config.get("user_name", "")
+
+            # 合并本月和上月的日数据
+            day_list_raw = []
+            if current_month_data and isinstance(current_month_data, list):
+                day_list_raw.extend(current_month_data)
+            if last_month_data and isinstance(last_month_data, list):
+                day_list_raw.extend(last_month_data)
+
+            # 转换为标准日数据格式
+            day_list = self._convert_day_list(day_list_raw)
+
+            # 计算每日费用
+            day_list = self._calculate_daily_cost(day_list)
+            day_list.reverse()  # 改为最新日期在前
+
+            # 处理月数据
+            month_list = self._process_month_data(day_list)
+
+            # 处理年数据
+            year_list = self._process_year_data(month_list)
+
+            return {
+                "date": date_str,
+                "balance": balance,
+                "dayList": day_list,
+                "monthList": month_list,
+                "yearList": year_list,
+                "consumer_name": consumer_name,
+            }
+        except Exception as ex:
+            _LOGGER.error("处理燃气数据失败: %s", ex)
+            return {}
+
+    def _convert_day_list(self, raw_data: list) -> list:
+        """Convert raw daily data to standard format.
+
+        Handles various possible field names from the API.
+        """
+        result = []
+        for item in raw_data:
+            if not isinstance(item, dict):
+                continue
+
+            # 尝试多种日期字段名
+            day = (
+                item.get("f_date")
+                or item.get("f_hand_date")
+                or item.get("date")
+                or item.get("day")
+                or ""
+            )
+            if not day:
+                continue
+
+            # 格式化日期为 YYYY-MM-DD
+            day = self._normalize_date(day)
+            if not day:
+                continue
+
+            # 尝试多种用气量字段名
+            day_ele_num = float(
+                item.get("f_gas")
+                or item.get("f_oughtamount")
+                or item.get("f_consumption")
+                or item.get("dayEleNum")
+                or item.get("gas")
+                or 0
+            )
+
+            result.append({
+                "day": day,
+                "dayEleNum": day_ele_num,
+                "dayEleCost": 0,
+            })
+
+        return result
+
+    def _normalize_date(self, date_str: str) -> str:
+        """Normalize date string to YYYY-MM-DD format."""
+        if not date_str:
+            return ""
+        date_str = str(date_str).strip()
+        # 已经是标准格式
+        if len(date_str) == 10 and date_str[4] == "-" and date_str[7] == "-":
+            return date_str
+        # YYYYMMDD 格式
+        if len(date_str) == 8 and date_str.isdigit():
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+        # 尝试其他格式
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return ""
+
+    def _calculate_daily_cost(self, day_list: list) -> list:
+        """Calculate daily gas cost based on year-ladder billing."""
+        ladder_level_1 = self.config.get(CONF_LADDER_LEVEL_1, DEFAULT_LADDER_LEVEL_1)
+        ladder_level_2 = self.config.get(CONF_LADDER_LEVEL_2, DEFAULT_LADDER_LEVEL_2)
+        price_1 = self.config.get(CONF_LADDER_PRICE_1, DEFAULT_LADDER_PRICE_1)
+        price_2 = self.config.get(CONF_LADDER_PRICE_2, DEFAULT_LADDER_PRICE_2)
+        price_3 = self.config.get(CONF_LADDER_PRICE_3, DEFAULT_LADDER_PRICE_3)
+        year_ladder_start = self.config.get(CONF_YEAR_LADDER_START, DEFAULT_YEAR_LADDER_START)
+
+        for item in day_list:
+            day_ele_num = item["dayEleNum"]
+            current_day = item["day"]
+
+            # 计算年阶梯
+            current_year = int(current_day.split("-")[0])
+            current_month = int(current_day.split("-")[1])
+            current_day_int = int(current_day.split("-")[2])
+
+            start_month = int(year_ladder_start[:2])
+            start_day_int = int(year_ladder_start[2:])
+
+            if (current_month < start_month) or (current_month == start_month and current_day_int < start_day_int):
+                ladder_year = current_year - 1
+            else:
+                ladder_year = current_year
+
+            year_ladder_start_date = f"{ladder_year}-{year_ladder_start[:2]}-{year_ladder_start[2:]}"
+
+            # 计算年累计用气量
+            year_accumulated = 0
+            for data in day_list:
+                if data["day"] >= year_ladder_start_date and data["day"] <= current_day:
+                    year_accumulated += data["dayEleNum"]
+
+            # 根据阶梯计算费用
+            day_cost = self._calculate_ladder_cost(
+                day_ele_num, year_accumulated,
+                ladder_level_1, ladder_level_2,
+                price_1, price_2, price_3,
+            )
+            item["dayEleCost"] = round(day_cost, 2)
 
         return day_list
 
-    def _generate_single_day(self, date_str: str, existing_days: list) -> dict:
-        """生成单日伪造用水数据，基于平均用量加随机波动，按年阶梯计算费用."""
-        # 日均用量 + 随机波动
-        variation = random.uniform(-VARIATION_RANGE, VARIATION_RANGE)
-        daily_volume = max(0.05, DEFAULT_DAILY_VOLUME + variation)
-        daily_volume = round(daily_volume, 2)
-
-        # 计算该年累计用水量（本日之前）
-        year = int(date_str[:4])
-        prev_annual = sum(
-            d["dayEleNum"] for d in existing_days
-            if d["day"].startswith(str(year)) and d["day"] < date_str
-        )
-        current_annual = prev_annual + daily_volume
-
-        # 根据年阶梯计算费用
-        daily_cost = self._calculate_tier_cost(daily_volume, prev_annual, current_annual)
-
-        return {
-            "day": date_str,
-            "dayEleNum": daily_volume,
-            "dayEleCost": round(daily_cost, 2),
-        }
-
-    def _calculate_tier_cost(self, daily_volume, prev_annual, current_annual):
-        """根据年阶梯水价计算单日费用."""
-        if daily_volume == 0:
+    def _calculate_ladder_cost(
+        self, day_ele_num, year_accumulated,
+        ladder_level_1, ladder_level_2,
+        price_1, price_2, price_3,
+    ):
+        """Calculate cost based on year-ladder billing."""
+        if day_ele_num == 0:
             return 0
 
-        if current_annual <= TIER_LEVEL_1:
-            # 全部在第1档
-            return daily_volume * TIER_PRICE_1
-        elif current_annual <= TIER_LEVEL_2:
-            if prev_annual <= TIER_LEVEL_1:
-                # 跨第1档和第2档
-                tier1_part = TIER_LEVEL_1 - prev_annual
-                tier2_part = daily_volume - tier1_part
-                return tier1_part * TIER_PRICE_1 + tier2_part * TIER_PRICE_2
+        if year_accumulated <= ladder_level_1:
+            return day_ele_num * price_1
+        elif year_accumulated <= ladder_level_2:
+            if year_accumulated - day_ele_num <= ladder_level_1:
+                first_part = ladder_level_1 - (year_accumulated - day_ele_num)
+                second_part = day_ele_num - first_part
+                return first_part * price_1 + second_part * price_2
             else:
-                # 全部在第2档
-                return daily_volume * TIER_PRICE_2
+                return day_ele_num * price_2
         else:
-            if prev_annual <= TIER_LEVEL_1:
-                # 跨第1、2、3档
-                tier1_part = TIER_LEVEL_1 - prev_annual
-                remaining = daily_volume - tier1_part
-                tier2_capacity = TIER_LEVEL_2 - TIER_LEVEL_1
-                if remaining <= tier2_capacity:
-                    return tier1_part * TIER_PRICE_1 + remaining * TIER_PRICE_2
+            if year_accumulated - day_ele_num <= ladder_level_1:
+                first_part = ladder_level_1 - (year_accumulated - day_ele_num)
+                remaining = day_ele_num - first_part
+                if year_accumulated - day_ele_num + first_part + remaining <= ladder_level_2:
+                    second_part = ladder_level_2 - (year_accumulated - day_ele_num + first_part)
+                    third_part = remaining - second_part
+                    return first_part * price_1 + second_part * price_2 + third_part * price_3
                 else:
-                    tier2_part = tier2_capacity
-                    tier3_part = remaining - tier2_part
-                    return tier1_part * TIER_PRICE_1 + tier2_part * TIER_PRICE_2 + tier3_part * TIER_PRICE_3
-            elif prev_annual <= TIER_LEVEL_2:
-                # 跨第2、3档
-                tier2_part = TIER_LEVEL_2 - prev_annual
-                tier3_part = daily_volume - tier2_part
-                return tier2_part * TIER_PRICE_2 + tier3_part * TIER_PRICE_3
+                    return day_ele_num * price_3
+            elif year_accumulated - day_ele_num <= ladder_level_2:
+                second_part = ladder_level_2 - (year_accumulated - day_ele_num)
+                third_part = day_ele_num - second_part
+                return second_part * price_2 + third_part * price_3
             else:
-                # 全部在第3档
-                return daily_volume * TIER_PRICE_3
+                return day_ele_num * price_3
 
     def _process_month_data(self, day_list: list) -> list:
-        """从日数据汇总月数据."""
+        """Process monthly data from daily data."""
         try:
             month_map = {}
             for day_item in day_list:
@@ -245,13 +396,13 @@ class XianWaterCoordinator(DataUpdateCoordinator):
                     "monthEleCost": round(month_data["monthEleCost"], 2),
                 })
 
-            return sorted(result, key=lambda x: x["month"])
+            return sorted(result, key=lambda x: x["month"], reverse=True)
         except Exception as ex:
             _LOGGER.error("处理月数据失败: %s", ex)
             return []
 
     def _process_year_data(self, month_list: list) -> list:
-        """从月数据汇总年数据."""
+        """Process yearly data from monthly data."""
         try:
             year_map = {}
             for month_data in month_list:
@@ -279,19 +430,19 @@ class XianWaterCoordinator(DataUpdateCoordinator):
             return []
 
 
-class XianWaterSensor(SensorEntity):
-    """Representation of a 西安水费 sensor."""
+class QinhuaGasSensor(SensorEntity):
+    """Representation of a Qinghua Gas sensor."""
 
-    def __init__(self, coordinator: XianWaterCoordinator, config: dict):
+    def __init__(self, coordinator: QinhuaGasCoordinator, config: dict):
         """Initialize the sensor."""
         self.coordinator = coordinator
         self.config = config
-        client_code = config.get("client_code", "")
-        self._attr_unique_id = f"xian_water_{client_code}"
-        self._attr_name = f"西安水费 {client_code}"
-        self._attr_icon = "mdi:water"
+        card_id = config.get("card_id", "")
+        self._attr_unique_id = f"qinhua_gas_{card_id}"
+        self._attr_name = f"秦华燃气 {card_id}"
+        self._attr_icon = "mdi:fire"
         self._attr_native_unit_of_measurement = "元"
-        self._client_code = client_code
+        self._card_id = card_id
 
     @property
     def available(self):
@@ -332,55 +483,67 @@ class XianWaterSensor(SensorEntity):
 
                             attrs["日均消费"] = round(avg_daily_cost, 2)
                             attrs["剩余天数"] = math.ceil(remaining_days)
-                            attrs["预付费"] = "否"
+                            attrs["预付费"] = "是" if self.config.get(CONF_IS_PREPAID, False) else "否"
                         except (ValueError, IndexError) as e:
                             _LOGGER.error("计算剩余天数时出错: %s", e)
 
-            # 按日期倒序输出列表
-            sorted_daylist = sorted(
-                self.coordinator.data.get("dayList", []),
-                key=lambda x: x["day"], reverse=True
-            )
-            sorted_monthlist = sorted(
-                self.coordinator.data.get("monthList", []),
-                key=lambda x: x["month"], reverse=True
-            )
-
             attrs.update({
                 "date": self.coordinator.data.get("date", ""),
-                "daylist": sorted_daylist,
-                "monthlist": sorted_monthlist,
+                "daylist": self.coordinator.data.get("dayList", []),
+                "monthlist": self.coordinator.data.get("monthList", []),
                 "yearlist": self.coordinator.data.get("yearList", []),
             })
 
         # 计费标准信息
+        ladder_level_1 = self.config.get(CONF_LADDER_LEVEL_1, DEFAULT_LADDER_LEVEL_1)
+        ladder_level_2 = self.config.get(CONF_LADDER_LEVEL_2, DEFAULT_LADDER_LEVEL_2)
+        price_1 = self.config.get(CONF_LADDER_PRICE_1, DEFAULT_LADDER_PRICE_1)
+        price_2 = self.config.get(CONF_LADDER_PRICE_2, DEFAULT_LADDER_PRICE_2)
+        price_3 = self.config.get(CONF_LADDER_PRICE_3, DEFAULT_LADDER_PRICE_3)
+        year_ladder_start = self.config.get(CONF_YEAR_LADDER_START, DEFAULT_YEAR_LADDER_START)
+
         billing_attrs = {"计费标准": "年阶梯"}
+
+        # 获取当前阶梯档和累计用气量
         ladder_info = self._get_ladder_info()
         billing_attrs.update(ladder_info)
 
-        billing_attrs["年阶梯第2档起始水量"] = TIER_LEVEL_1
-        billing_attrs["年阶梯第3档起始水量"] = TIER_LEVEL_2
-        billing_attrs["年阶梯第1档水价"] = TIER_PRICE_1
-        billing_attrs["年阶梯第2档水价"] = TIER_PRICE_2
-        billing_attrs["年阶梯第3档水价"] = TIER_PRICE_3
+        billing_attrs["年阶梯第2档起始气量"] = ladder_level_1
+        billing_attrs["年阶梯第3档起始气量"] = ladder_level_2
+        billing_attrs["年阶梯第1档气价"] = price_1
+        billing_attrs["年阶梯第2档气价"] = price_2
+        billing_attrs["年阶梯第3档气价"] = price_3
 
         # 当前年阶梯日期范围
         current_date = datetime.now()
         current_year = current_date.year
-        year_ladder_start_date = f"{current_year}.01.01"
-        year_ladder_end_date = f"{current_year}.12.31"
-        billing_attrs["当前年阶梯起始日期"] = year_ladder_start_date
-        billing_attrs["当前年阶梯结束日期"] = year_ladder_end_date
+        current_month = current_date.month
+        current_day_int = current_date.day
+        start_month = int(year_ladder_start[:2])
+        start_day = int(year_ladder_start[2:])
+
+        if (current_month < start_month) or (current_month == start_month and current_day_int < start_day):
+            ladder_year = current_year - 1
+        else:
+            ladder_year = current_year
+
+        year_ladder_start_date_formatted = f"{ladder_year}.{year_ladder_start[:2]}.{year_ladder_start[2:]}"
+        start_date_next_year = datetime(ladder_year + 1, start_month, start_day)
+        end_date = start_date_next_year - timedelta(days=1)
+        year_ladder_end_date_formatted = f"{end_date.year}.{end_date.month:02d}.{end_date.day:02d}"
+
+        billing_attrs["当前年阶梯起始日期"] = year_ladder_start_date_formatted
+        billing_attrs["当前年阶梯结束日期"] = year_ladder_end_date_formatted
 
         attrs["计费标准"] = billing_attrs
 
-        attrs["数据源"] = "西安水务"
+        attrs["数据源"] = "秦华燃气"
         attrs["最后同步日期"] = self.coordinator.last_update_time.strftime("%Y-%m-%d %H:%M:%S")
 
         return attrs
 
     def _get_ladder_info(self):
-        """获取当前阶梯档和累计用水量信息."""
+        """获取当前阶梯档和累计用气量信息."""
         try:
             if not self.coordinator.data or not self.coordinator.data.get("dayList"):
                 return {}
@@ -389,22 +552,43 @@ class XianWaterSensor(SensorEntity):
             if not day_list:
                 return {}
 
-            current_year = str(datetime.now().year)
-            year_accumulated = sum(
-                d["dayEleNum"] for d in day_list
-                if d["day"].startswith(current_year)
-            )
+            sorted_days = sorted(day_list, key=lambda x: x["day"], reverse=True)
+            latest_day_data = sorted_days[0]
 
-            if year_accumulated <= TIER_LEVEL_1:
+            ladder_level_1 = self.config.get(CONF_LADDER_LEVEL_1, DEFAULT_LADDER_LEVEL_1)
+            ladder_level_2 = self.config.get(CONF_LADDER_LEVEL_2, DEFAULT_LADDER_LEVEL_2)
+            year_ladder_start = self.config.get(CONF_YEAR_LADDER_START, DEFAULT_YEAR_LADDER_START)
+
+            current_day = latest_day_data["day"]
+            current_year = int(current_day.split("-")[0])
+            current_month = int(current_day.split("-")[1])
+            current_day_int = int(current_day.split("-")[2])
+
+            start_month = int(year_ladder_start[:2])
+            start_day_int = int(year_ladder_start[2:])
+
+            if (current_month < start_month) or (current_month == start_month and current_day_int < start_day_int):
+                ladder_year = current_year - 1
+            else:
+                ladder_year = current_year
+
+            year_ladder_start_date = f"{ladder_year}-{year_ladder_start[:2]}-{year_ladder_start[2:]}"
+
+            year_accumulated = 0
+            for data in day_list:
+                if data["day"] >= year_ladder_start_date and data["day"] <= current_day:
+                    year_accumulated += data["dayEleNum"]
+
+            if year_accumulated <= ladder_level_1:
                 current_ladder = "第1档"
-            elif year_accumulated <= TIER_LEVEL_2:
+            elif year_accumulated <= ladder_level_2:
                 current_ladder = "第2档"
             else:
                 current_ladder = "第3档"
 
             return {
                 "当前年阶梯档": current_ladder,
-                "年阶梯累计用水量": round(year_accumulated, 2),
+                "年阶梯累计用气量": round(year_accumulated, 2),
             }
         except Exception as ex:
             _LOGGER.error("获取阶梯信息失败: %s", ex)

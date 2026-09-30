@@ -15,6 +15,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -40,6 +41,19 @@ DEFAULT_LADDER_PRICE_1 = 2.18
 DEFAULT_LADDER_PRICE_2 = 2.62
 DEFAULT_LADDER_PRICE_3 = 3.27
 DEFAULT_YEAR_LADDER_START = "0101"
+
+
+def build_device_info(card_id: str) -> DeviceInfo:
+    """构造两个实体共用的设备信息。
+
+    两个实体必须使用**同一组 identifiers**，否则 HA 会为每个实体各建一个设备。
+    """
+    return DeviceInfo(
+        identifiers={(DOMAIN, card_id)},
+        name=f"秦华燃气 {card_id}",
+        manufacturer="秦华燃气",
+        model="燃气表",
+    )
 
 
 async def async_setup_entry(
@@ -458,6 +472,7 @@ class QinhuaGasSensor(SensorEntity):
         self._attr_icon = "mdi:fire"
         self._attr_native_unit_of_measurement = "元"
         self._card_id = card_id
+        self._attr_device_info = build_device_info(card_id)
 
     @property
     def available(self):
@@ -639,6 +654,7 @@ class QinhuaGasTotalGasSensor(SensorEntity):
         self._attr_unique_id = f"qinhua_gas_{card_id}_total_gas"
         self._attr_name = f"秦华燃气 {card_id} 累计用气"
         self._attr_icon = "mdi:fire"
+        self._attr_device_info = build_device_info(card_id)
         if card_id:
             self.entity_id = f"sensor.qinhua_gas_{card_id}_total_gas"
 

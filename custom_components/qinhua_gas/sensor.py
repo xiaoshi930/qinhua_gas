@@ -8,8 +8,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+)
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -24,6 +28,7 @@ from .const import (
     CONF_LADDER_PRICE_3,
     CONF_YEAR_LADDER_START,
 )
+from .statistics import async_import_gas_statistics
 from .storage import QinhuaGasStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,13 +54,16 @@ async def async_setup_entry(
     await coordinator.async_load_storage()
     await coordinator.async_config_entry_first_refresh()
 
-    sensor = QinhuaGasSensor(coordinator, config)
+    entities = [
+        QinhuaGasSensor(coordinator, config),
+        QinhuaGasTotalGasSensor(coordinator, config),
+    ]
 
     hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
-    hass.data[DOMAIN][entry.entry_id]["entities"] = [sensor]
+    hass.data[DOMAIN][entry.entry_id]["entities"] = entities
 
-    async_add_entities([sensor], True)
+    async_add_entities(entities, True)
 
 
 class QinhuaGasCoordinator(DataUpdateCoordinator):
@@ -143,6 +151,13 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
                     self.data = {}
 
             self.last_update_time = datetime.now()
+
+            # 回填 HA 长期统计，供能源面板「燃气消耗」显示历史曲线
+            try:
+                await async_import_gas_statistics(self.hass, self._storage, card_id)
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.warning("导入燃气长期统计失败: %s", ex)
+
             return self.data
 
         except Exception as ex:
@@ -593,6 +608,78 @@ class QinhuaGasSensor(SensorEntity):
         except Exception as ex:
             _LOGGER.error("获取阶梯信息失败: %s", ex)
             return {}
+
+    async def async_added_to_hass(self):
+        """When entity is added to hass."""
+        await super().async_added_to_hass()
+        self.async_on_remove(self.coordinator.async_add_listener(self.async_write_ha_state))
+
+
+class QinhuaGasTotalGasSensor(SensorEntity):
+    """累计用气量传感器，供 HA 能源面板的「燃气消耗」使用。
+
+    取值 = 全部日用气量之和（storage 的 dayList 只增不删、不重算历史日，故单调不减）。
+
+    刻意**不设置** state_class：statistics.py 已把同一份日用量回填为外部长期统计
+    （statistic_id `qinhua_gas:total_gas_<card_id>`，含完整历史）。若本实体再带
+    state_class，Recorder 会为它额外生成一份同源统计，两条会并列出现在能源面板的
+    数据源下拉里、且显示名相同，极易被同时选中，导致用气量被算两遍。
+    """
+
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_native_unit_of_measurement = UnitOfVolume.CUBIC_METERS
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: QinhuaGasCoordinator, config: dict):
+        """Initialize the sensor."""
+        self.coordinator = coordinator
+        self.config = config
+        card_id = config.get("card_id", "")
+        self._card_id = card_id
+        self._attr_unique_id = f"qinhua_gas_{card_id}_total_gas"
+        self._attr_name = f"秦华燃气 {card_id} 累计用气"
+        self._attr_icon = "mdi:fire"
+        if card_id:
+            self.entity_id = f"sensor.qinhua_gas_{card_id}_total_gas"
+
+    @property
+    def available(self):
+        """Return if entity is available."""
+        return self.coordinator.data is not None and bool(
+            self.coordinator.data.get("dayList")
+        )
+
+    @property
+    def native_value(self):
+        """Return lifetime cumulative gas usage in m³."""
+        if not self.coordinator.data:
+            return 0
+        return round(
+            sum(
+                float(day.get("dayEleNum", 0) or 0)
+                for day in self.coordinator.data.get("dayList", [])
+            ),
+            2,
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return state attributes."""
+        data = self.coordinator.data or {}
+        current_year = str(datetime.now().year)
+        current_year_num = next(
+            (
+                item.get("yearEleNum", 0)
+                for item in data.get("yearList", [])
+                if item.get("year") == current_year
+            ),
+            0,
+        )
+        return {
+            "当年用气": round(float(current_year_num or 0), 2),
+            "数据源": "秦华燃气",
+            "最后同步日期": self.coordinator.last_update_time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""

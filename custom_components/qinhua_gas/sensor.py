@@ -30,7 +30,10 @@ from .const import (
     CONF_LADDER_PRICE_3,
     CONF_YEAR_LADDER_START,
 )
-from .statistics import async_import_gas_statistics
+from .statistics import (
+    async_import_gas_cost_statistics,
+    async_import_gas_statistics,
+)
 from .storage import QinhuaGasStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -173,6 +176,12 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
                 await async_import_gas_statistics(self.hass, self._storage, card_id)
             except Exception as ex:  # pylint: disable=broad-except
                 _LOGGER.warning("导入燃气长期统计失败: %s", ex)
+
+            # 回填「燃气费」统计，供能源面板「成本跟踪 → 统计」显示历史成本曲线
+            try:
+                await async_import_gas_cost_statistics(self.hass, self._storage, card_id)
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.warning("导入燃气费长期统计失败: %s", ex)
 
             return self.data
 

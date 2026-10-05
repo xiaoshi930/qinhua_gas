@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 
 
 from .const import DOMAIN
+from .sensor import QinhuaGasCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -18,6 +19,14 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Qinghua Gas from a config entry."""
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = dict(entry.data)
+
+    # coordinator 创建 + 首次刷新必须放在 forward setups 之前：
+    # 首刷失败时在这里抛 ConfigEntryNotReady，HA 会自动重试整个 entry setup，
+    # 而不是在已 forward 的 sensor 平台内部抛出（HA 会对该写法记 warning）
+    coordinator = QinhuaGasCoordinator(hass, dict(entry.data))
+    await coordinator.async_load_storage()
+    await coordinator.async_config_entry_first_refresh()
+    hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(update_listener))

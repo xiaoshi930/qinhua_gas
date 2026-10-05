@@ -1,6 +1,7 @@
 """Sensor platform for Qinghua Gas integration."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -68,9 +69,8 @@ async def async_setup_entry(
     """Set up the Qinghua Gas sensor platform."""
     config = entry.data
 
-    coordinator = QinhuaGasCoordinator(hass, config)
-    await coordinator.async_load_storage()
-    await coordinator.async_config_entry_first_refresh()
+    # coordinator 在 __init__.py 中创建并完成首次刷新，这里直接复用
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
     entities = [
         QinhuaGasSensor(coordinator, config),
@@ -78,8 +78,6 @@ async def async_setup_entry(
         QinhuaGasTotalCostSensor(coordinator, config),
     ]
 
-    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-    hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
     hass.data[DOMAIN][entry.entry_id]["entities"] = entities
 
     async_add_entities(entities, True)
@@ -218,8 +216,9 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
                         response_text = await response.text()
                         _LOGGER.error("请求失败 status=%s url=%s response=%s", response.status, url, response_text)
                         return None
-        except aiohttp.ClientError as err:
-            _LOGGER.error("请求错误: %s url=%s", err, url)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            # 超时（TimeoutError 的 str 为空）也在这里兜住，返回 None 让上层回退持久化数据
+            _LOGGER.warning("请求失败或超时: %s url=%s", err or "Timeout", url)
             return None
 
     def _process_data(self, account_data, current_month_data, last_month_data):

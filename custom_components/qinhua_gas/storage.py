@@ -168,7 +168,7 @@ class QinhuaGasStorage:
     def get_statistics_cursor(self, key: str) -> dict[str, Any]:
         """读取指定统计的导入游标。
 
-        返回 {last_imported_day, last_imported_total}，无记录时返回空字典。
+        返回 {last_imported_day, last_imported_total, signature}，无记录时返回空字典。
         纯内存读取，不需要 executor。
         """
         stats = self._data.get("statistics")
@@ -177,17 +177,31 @@ class QinhuaGasStorage:
         cursor = stats.get(key)
         return dict(cursor) if isinstance(cursor, dict) else {}
 
-    def set_statistics_cursor(self, key: str, last_day, last_total: float) -> None:
+    def set_statistics_cursor(
+        self,
+        key: str,
+        last_day,
+        last_total: float,
+        signature: str | None = None,
+    ) -> None:
         """写入统计游标并落盘（同步，需通过 executor 调用）。
 
         只写入 "statistics" 键，不触碰任何业务字段。
+        signature 为历史指纹（首日|条数|累计），与游标一起落盘；
+        缺失或与当前 dayList 不符时，statistics.py 会触发全量重导。
+        注意必须在导入**成功之后**与游标一起写，否则会出现
+        「指纹已更新、基线还是旧值」的错位。
         """
         stats = self._data.get("statistics")
         if not isinstance(stats, dict):
             stats = {}
             self._data["statistics"] = stats
-        stats[key] = {
-            "last_imported_day": last_day,
-            "last_imported_total": round(float(last_total or 0.0), 4),
-        }
+        entry = stats.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["last_imported_day"] = last_day
+        entry["last_imported_total"] = round(float(last_total or 0.0), 4)
+        if signature is not None:
+            entry["signature"] = signature
+        stats[key] = entry
         self._save_sync()

@@ -151,7 +151,11 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
             if not account_data:
                 _LOGGER.warning("未获取到账户数据，使用持久化数据")
                 if self._storage.data.get("dayList"):
-                    return dict(self._storage.data)
+                    self.data = dict(self._storage.data)
+                    # 接口不可用也要回填长期统计：能源面板的历史来自本地 dayList，
+                    # 跟接口通不通没关系，否则接口抽风期间面板会一直缺历史
+                    await self._import_statistics(card_id)
+                    return self.data
                 return {}
 
             # 处理数据
@@ -169,23 +173,33 @@ class QinhuaGasCoordinator(DataUpdateCoordinator):
 
             self.last_update_time = datetime.now()
 
-            # 回填 HA 长期统计，供能源面板「燃气消耗」显示历史曲线
-            try:
-                await async_import_gas_statistics(self.hass, self._storage, card_id)
-            except Exception as ex:  # pylint: disable=broad-except
-                _LOGGER.warning("导入燃气长期统计失败: %s", ex)
-
-            # 回填「燃气费」统计，供能源面板「成本跟踪 → 统计」显示历史成本曲线
-            try:
-                await async_import_gas_cost_statistics(self.hass, self._storage, card_id)
-            except Exception as ex:  # pylint: disable=broad-except
-                _LOGGER.warning("导入燃气费长期统计失败: %s", ex)
+            # 回填 HA 长期统计，供能源面板「燃气消耗 / 成本跟踪」显示历史曲线
+            await self._import_statistics(card_id)
 
             return self.data
 
         except Exception as ex:
             _LOGGER.error("更新燃气数据失败: %s", ex)
             raise UpdateFailed(f"Error updating gas data: {ex}")
+
+    async def _import_statistics(self, card_id: str) -> None:
+        """把历史日用气量 / 日燃气费回填到 HA 长期统计（能源面板依赖它）。
+
+        单独抽成一个方法是为了让回填与**接口是否可用解耦**：只要 storage 里
+        有 dayList 就尝试回填，避免接口抽风时能源面板一直没有历史。
+        两份统计互不影响，各自失败只记 warning，不影响实体数据。
+        """
+        # 回填 HA 长期统计，供能源面板「燃气消耗」显示历史曲线
+        try:
+            await async_import_gas_statistics(self.hass, self._storage, card_id)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.warning("导入燃气长期统计失败: %s", ex)
+
+        # 回填「燃气费」统计，供能源面板「成本跟踪 → 统计」显示历史成本曲线
+        try:
+            await async_import_gas_cost_statistics(self.hass, self._storage, card_id)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.warning("导入燃气费长期统计失败: %s", ex)
 
     async def _make_request(self, data: dict, token: str, url: str) -> dict[str, Any] | None:
         """Make HTTP request with given data and token."""

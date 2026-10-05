@@ -7,9 +7,15 @@
 - 两份统计各自一份游标（total_gas / total_cost），互不影响、可独立失败重试。
 - 每天一条：sum = 累计到当天末的值，state = 当天的值。
   能源面板按 sum 的差分算每日消耗/每日成本，所以首日不会出现「从 0 跳到总额」的假尖峰。
-- 幂等靠**两重**保证：
+- 幂等靠**三重**保证：
   1) 游标（last_imported_day / last_imported_total）只导入新数据；
-  2) **基线自校验**：用当前 storage 重算「截至 last_imported_day 的累计值」，
+  2) **历史指纹**（signature = 首日|条数|累计，**只覆盖已导入范围**）变化 → 全量重导。
+     向前补写历史（外部脚本往 dayList 里补更早的日记录）会同时改变首日和条数，
+     删改日记录亦然。它专门兜住 3) 查不出来的场景：外部脚本改写 dayList 时
+     顺手把游标总量也"同步"了，3) 就会误判为"没变过"而跳过导入，能源面板
+     永远拿不到历史。指纹只算 day <= last_imported_day 的那一段，所以新的一天
+     追加到游标之后不会改变指纹，不会每个刷新日都触发全量重导。
+  3) **基线自校验**：用当前 storage 重算「截至 last_imported_day 的累计值」，
      与游标里的 last_imported_total 不一致 → 说明历史被重算过（改气价、
      或上游修订了旧数据），直接全量重导。
 - 导入失败时不推进游标，下次刷新重试同一段完整数据。
@@ -157,6 +163,34 @@ def baseline_matches(
     return abs(total - expected_total) <= _BASELINE_TOLERANCE
 
 
+def series_signature(series: list[tuple[str, float]], upto: str | None) -> str | None:
+    """已导入范围的「历史指纹」：首日 | 条数 | 累计值。
+
+    只统计 day <= upto（即游标声称已导入的那一段），因此游标之后新增的日子
+    不会改变指纹 —— 否则每次刷新都会误判成"历史被改写"而全量重导。
+    向前补写历史（补更早的日记录）、删改日记录、修订数值都会改变指纹，
+    这条是「基线自校验」查不出场景的兜底（见模块 docstring 第 2 点）。
+    """
+    if upto is None:
+        return None
+
+    first: str | None = None
+    count = 0
+    total = 0.0
+    for day_str, value in series:
+        if day_str > upto:
+            break
+        if first is None:
+            first = day_str
+        count += 1
+        total = round(total + value, 4)
+
+    if first is None:
+        # 游标指向的范围里一天都没有：历史被整体清掉或被回退
+        return None
+    return f"{first}|{count}|{total:.2f}"
+
+
 async def _async_import_series(
     hass: HomeAssistant,
     storage: "QinhuaGasStorage",
@@ -177,11 +211,19 @@ async def _async_import_series(
 
     series = clean_series(storage.data.get("dayList", []), value_field)
 
+    signature_changed = last_imported_day is not None and cursor.get(
+        "signature"
+    ) != series_signature(series, last_imported_day)
     baseline_changed = last_imported_day is not None and not baseline_matches(
         series, last_imported_day=last_imported_day, expected_total=running_total
     )
-    if baseline_changed:
-        _LOGGER.info("%s 历史被重算（基线不一致），将全量重导", label)
+    if signature_changed or baseline_changed:
+        _LOGGER.info(
+            "%s 历史被改写（指纹变化=%s / 基线不一致=%s），将全量重导",
+            label,
+            signature_changed,
+            baseline_changed,
+        )
         last_imported_day = None
         running_total = 0.0
 
@@ -220,6 +262,8 @@ async def _async_import_series(
         stat_key,
         new_last_day,
         new_last_total,
+        # 指纹与游标一起落盘（导入成功后才写），下次刷新用它判断历史有没有被改写
+        series_signature(series, new_last_day),
     )
     _LOGGER.info(
         "已导入 %d 条%s到 HA 统计 (最新日=%s, 累计=%.2f %s)",
